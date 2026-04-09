@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>互动照片墙（多设备实时同步）</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0a; overflow: hidden; font-family: Arial; }
+
+    /* 评论飘屏样式 */
+    .comment {
+      position: fixed;
+      background: rgba(255,255,255,0.95);
+      color: #222;
+      padding: 8px 14px;
+      border-radius: 50px;
+      font-size: 14px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.2);
+      animation: float 6s linear forwards;
+      white-space: nowrap;
+      z-index: 999;
+    }
+    @keyframes float {
+      0% { transform: translateY(100vh); opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { transform: translateY(-100px); opacity: 0; }
+    }
+
+    /* 照片动画样式 */
+    .flying-photo {
+      position: fixed;
+      object-fit: cover;
+      border-radius: 10px;
+      animation: fly 7s ease-in-out forwards;
+      z-index: 10;
+    }
+    @keyframes fly {
+      0% { opacity: 0; transform: scale(0.8); }
+      20% { opacity: 1; transform: scale(1); }
+      80% { opacity: 1; transform: scale(1); }
+      100% { opacity: 0; transform: scale(0.8); }
+    }
+
+    /* 操作面板样式 */
+    .upload-panel {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #fff;
+      padding: 10px 15px;
+      border-radius: 20px;
+      display: flex;
+      gap: 10px;
+      z-index: 9999;
+    }
+    #fileInput { display: none; }
+    button, input[type="text"] {
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: none;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    input[type="text"] {
+      border: 1px solid #ddd;
+      min-width: 160px;
+    }
+    .upload-btn { background: #3b82f6; color: white; }
+    .send-btn { background: #10b981; color: white; }
+  </style>
+</head>
+
+<body>
+  <div class="upload-panel">
+    <input type="file" id="fileInput" accept="image/*">
+    <button class="upload-btn" onclick="openFileSelector()">📸 上传照片</button>
+    <input type="text" id="msg" placeholder="说点什么...">
+    <button class="send-btn" onclick="sendComment()">💬 发送</button>
+  </div>
+
+  <script>
+    // ======================
+    // 核心配置：免费公共WebSocket服务器（无需注册，直接用）
+    // ======================
+    const WS_SERVER = "wss://echo.websocket.events"; // 稳定的免费公共WS服务器
+    let ws; // WebSocket实例
+    let photos = []; // 所有照片URL
+    let comments = []; // 所有评论
+    const ROOM_ID = "photo-wall-123"; // 房间ID，确保所有设备连同一个房间
+
+    // ======================
+    // 初始化WebSocket连接（核心：多设备同步）
+    // ======================
+    function initWebSocket() {
+      // 创建WebSocket连接
+      ws = new WebSocket(WS_SERVER);
+
+      // 连接成功
+      ws.onopen = () => {
+        console.log("✅ WebSocket连接成功，多设备同步已开启");
+        // 发送房间标识，确保同房间设备能接收消息
+        sendWsMessage({ type: "join", room: ROOM_ID });
+      };
+
+      // 接收其他设备的消息
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          // 只处理同房间的消息
+          if (data.room !== ROOM_ID) return;
+
+          // 处理评论消息
+          if (data.type === "comment") {
+            comments.push(data.text);
+            playOneComment(data.text);
+          }
+          // 处理照片消息
+          if (data.type === "photo") {
+            photos.push(data.url);
+          }
+        } catch (e) {
+          console.log("忽略非JSON消息:", event.data);
+        }
+      };
+
+      // 连接断开自动重连
+      ws.onclose = () => {
+        console.warn("❌ WebSocket断开，5秒后重连...");
+        setTimeout(initWebSocket, 5000);
+      };
+
+      // 连接错误
+      ws.onerror = (err) => {
+        console.error("WebSocket错误:", err);
+      };
+    }
+
+    // ======================
+    // 发送WebSocket消息（给所有设备）
+    // ======================
+    function sendWsMessage(data) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(data));
+      } else {
+        alert("⚠️ 同步连接未就绪，消息仅本地显示");
+        // 本地兜底显示
+        if (data.type === "comment") playOneComment(data.text);
+        if (data.type === "photo") photos.push(data.url);
+      }
+    }
+
+    // ======================
+    // 打开文件选择器（上传照片）
+    // ======================
+    function openFileSelector() {
+      document.getElementById("fileInput").click();
+      document.getElementById("fileInput").onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        // 方案1：上传到ImgBB获取直链（推荐，节省流量）
+        try {
+          const imgbbUrl = await uploadToImgBB(file);
+          // 发送照片URL给所有设备
+          sendWsMessage({
+            type: "photo",
+            room: ROOM_ID,
+            url: imgbbUrl
+          });
+          alert("✅ 照片上传成功，所有设备已同步！");
+        } catch (err) {
+          // 方案2：本地转Base64（无网络/ImgBB失效时兜底）
+          const base64Url = await fileToBase64(file);
+          sendWsMessage({
+            type: "photo",
+            room: ROOM_ID,
+            url: base64Url
+          });
+          alert("✅ 照片已本地同步（Base64），所有设备可见！");
+        }
+
+        // 清空文件选择框
+        e.target.value = "";
+      };
+    }
+
+    // ======================
+    // 上传到ImgBB获取Direct link
+    // ======================
+    async function uploadToImgBB(file) {
+      const IMGBB_KEY = "3229e907e0d604f33a90f59233c04b05"; // 有效Key
+      const formData = new FormData();
+      formData.append("image", file);
+      formData.append("key", IMGBB_KEY);
+
+      const res = await fetch("https://api.imgbb.com/1/upload", {
+        method: "POST",
+        body: formData,
+        mode: "cors"
+      });
+
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error?.message || "上传失败");
+      return data.data.url; // Direct link
+    }
+
+    // ======================
+    // 文件转Base64（本地兜底）
+    // ======================
+    function fileToBase64(file) {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target.result);
+        reader.readAsDataURL(file);
+      });
+    }
+
+    // ======================
+    // 发送评论
+    // ======================
+    function sendComment() {
+      const text = document.getElementById("msg").value.trim();
+      if (!text) return;
+      document.getElementById("msg").value = "";
+
+      // 发送评论给所有设备
+      sendWsMessage({
+        type: "comment",
+        room: ROOM_ID,
+        text: text
+      });
+    }
+
+    // ======================
+    // 播放评论动画
+    // ======================
+    function playOneComment(text) {
+      const div = document.createElement("div");
+      div.className = "comment";
+      div.innerText = text;
+      div.style.left = Math.random() * 70 + 10 + "vw";
+      document.body.appendChild(div);
+      setTimeout(() => div.remove(), 6000);
+    }
+
+    // ======================
+    // 播放照片动画
+    // ======================
+    function playRandomPhoto() {
+      if (photos.length === 0) return;
+      const url = photos[Math.floor(Math.random() * photos.length)];
+      const img = new Image();
+      img.src = url;
+      img.className = "flying-photo";
+      const size = Math.random() * 180 + 100;
+      img.style.width = size + "px";
+      img.style.height = size + "px";
+      img.style.left = Math.random() * (window.innerWidth - size) + "px";
+      img.style.top = Math.random() * (window.innerHeight - size) + "px";
+      document.body.appendChild(img);
+      setTimeout(() => img.remove(), 7000);
+    }
+
+    // ======================
+    // 自动轮播
+    // ======================
+    setInterval(() => {
+      if (comments.length) playOneComment(comments[Math.floor(Math.random() * comments.length)]);
+    }, 4000);
+
+    setInterval(playRandomPhoto, 2000);
+
+    // ======================
+    // 初始化
+    // ======================
+    initWebSocket();
+  </script>
+</body>
+</html>
