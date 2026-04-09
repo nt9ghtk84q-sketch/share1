@@ -83,24 +83,30 @@
 
   <script>
     // ======================
-    // 核心配置：免费公共WebSocket服务器（无需注册，直接用）
+    // 核心配置：替换为更稳定的Postman WebSocket服务器
     // ======================
-    const WS_SERVER = "wss://echo.websocket.events"; // 稳定的免费公共WS服务器
+    const WS_SERVER = "wss://ws.postman-echo.com/raw"; // 新的稳定服务器
     let ws; // WebSocket实例
     let photos = []; // 所有照片URL
     let comments = []; // 所有评论
     const ROOM_ID = "photo-wall-123"; // 房间ID，确保所有设备连同一个房间
+    let reconnectAttempts = 0; // 重连次数计数
+    const MAX_RECONNECT = 10; // 最大重连次数
 
     // ======================
-    // 初始化WebSocket连接（核心：多设备同步）
+    // 初始化WebSocket连接（优化重连逻辑）
     // ======================
     function initWebSocket() {
+      // 避免重复创建连接
+      if (ws && ws.readyState === WebSocket.OPEN) return;
+
       // 创建WebSocket连接
       ws = new WebSocket(WS_SERVER);
 
       // 连接成功
       ws.onopen = () => {
         console.log("✅ WebSocket连接成功，多设备同步已开启");
+        reconnectAttempts = 0; // 重置重连次数
         // 发送房间标识，确保同房间设备能接收消息
         sendWsMessage({ type: "join", room: ROOM_ID });
       };
@@ -109,8 +115,8 @@
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          // 只处理同房间的消息
-          if (data.room !== ROOM_ID) return;
+          // 过滤非本房间的消息 + 过滤自己发送的echo消息
+          if (data.room !== ROOM_ID || data.sender === getDeviceId()) return;
 
           // 处理评论消息
           if (data.type === "comment") {
@@ -122,14 +128,24 @@
             photos.push(data.url);
           }
         } catch (e) {
-          console.log("忽略非JSON消息:", event.data);
+          // 忽略非JSON格式的echo消息
+          if (!event.data.includes("\"type\":\"join\"")) {
+            console.log("忽略非JSON消息:", event.data);
+          }
         }
       };
 
-      // 连接断开自动重连
+      // 连接断开自动重连（优化策略）
       ws.onclose = () => {
-        console.warn("❌ WebSocket断开，5秒后重连...");
-        setTimeout(initWebSocket, 5000);
+        reconnectAttempts++;
+        if (reconnectAttempts <= MAX_RECONNECT) {
+          const delay = reconnectAttempts * 2000; // 重连间隔递增（2s,4s,6s...）
+          console.warn(`❌ WebSocket断开，${delay/1000}秒后重连（第${reconnectAttempts}次）...`);
+          setTimeout(initWebSocket, delay);
+        } else {
+          console.error("❌ 达到最大重连次数，停止重试");
+          alert("⚠️ 同步服务暂时不可用，仅能本地显示内容");
+        }
       };
 
       // 连接错误
@@ -139,11 +155,24 @@
     }
 
     // ======================
-    // 发送WebSocket消息（给所有设备）
+    // 生成唯一设备ID（避免接收自己发送的echo消息）
+    // ======================
+    function getDeviceId() {
+      if (!localStorage.getItem("deviceId")) {
+        localStorage.setItem("deviceId", Math.random().toString(36).substr(2, 9));
+      }
+      return localStorage.getItem("deviceId");
+    }
+
+    // ======================
+    // 发送WebSocket消息（给所有设备，带设备标识）
     // ======================
     function sendWsMessage(data) {
+      // 添加设备标识，避免接收自己的消息
+      const sendData = { ...data, sender: getDeviceId() };
+      
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(data));
+        ws.send(JSON.stringify(sendData));
       } else {
         alert("⚠️ 同步连接未就绪，消息仅本地显示");
         // 本地兜底显示
@@ -172,6 +201,7 @@
           });
           alert("✅ 照片上传成功，所有设备已同步！");
         } catch (err) {
+          console.error("ImgBB上传失败，切换本地Base64:", err);
           // 方案2：本地转Base64（无网络/ImgBB失效时兜底）
           const base64Url = await fileToBase64(file);
           sendWsMessage({
@@ -274,9 +304,9 @@
     setInterval(playRandomPhoto, 2000);
 
     // ======================
-    // 初始化
+    // 初始化（延迟1秒启动，避免页面加载冲突）
     // ======================
-    initWebSocket();
+    setTimeout(initWebSocket, 1000);
   </script>
 </body>
 </html>
